@@ -21,6 +21,7 @@ var replace = require('gulp-replace');
 var shell = require('gulp-shell');
 var eslint = require('gulp-eslint');
 var gulpif = require('gulp-if');
+var merge = require('merge-stream');
 var sourcemaps = require('gulp-sourcemaps');
 var through = require('through2');
 var fs = require('fs');
@@ -115,36 +116,58 @@ function watch(done) {
   done();
 };
 
-function makeDevpackPkg() {
-  var cloned = _.cloneDeep(webpackConfig);
-  cloned.devtool = 'source-map';
+function makeWebpackPkg(dev, done) {
+  var config = _.cloneDeep(webpackConfig);
+  if (dev) {
+    config.devtool = 'source-map';
+  } else {
+    delete config.devtool;
+  }
   var externalModules = helpers.getArgModules();
-
   const analyticsSources = helpers.getAnalyticsSources();
   const moduleSources = helpers.getModulePaths(externalModules);
-
-  return gulp.src([].concat(moduleSources, analyticsSources, 'src/prebid.js'))
-    .pipe(helpers.nameModules(externalModules))
-    .pipe(webpackStream(cloned, webpack))
-    .pipe(gulp.dest('build/dev'))
-    .pipe(connect.reload());
-}
-
-function makeWebpackPkg() {
-  var cloned = _.cloneDeep(webpackConfig);
-  delete cloned.devtool;
-
-  var externalModules = helpers.getArgModules();
-
-  const analyticsSources = helpers.getAnalyticsSources();
-  const moduleSources = helpers.getModulePaths(externalModules);
-
-  return gulp.src([].concat(moduleSources, analyticsSources, 'src/prebid.js'))
-    .pipe(helpers.nameModules(externalModules))
-    .pipe(webpackStream(cloned, webpack))
-    .pipe(uglify())
+  config.plugins.push(new webpack.DllPlugin({
+    context: __dirname,
+    name: 'p[hash]',
+    path: '/manifest.json' // this is in-memory fs so just put in root for easy access
+  }));
+  var coreDone = false;
+  var queue = [];
+  return merge(
+    gulp.src(['src/prebid.js'])
+      .pipe(helpers.nameModules(externalModules))
+      .pipe(webpackStream(config, webpack, function(_, stats) {
+        // setup config for modules that are currently queued
+        config.plugins[config.plugins.length - 1] = new webpack.DllReferencePlugin({
+          context: __dirname,
+          name: prebid.globalVarName,
+          manifest: JSON.parse(
+            stats.compilation.compiler.outputFileSystem.readFileSync('/manifest.json', 'utf-8')
+          )
+        });
+        coreDone = true;
+        while (queue.length) {
+          queue.shift()();
+        }
+      })),
+    gulp.src([].concat(moduleSources, analyticsSources))
+      .pipe(helpers.nameModules(externalModules))
+      // buffer modules until we have the manifest
+      .pipe(through.obj(function(file, enc, done) {
+        if (!coreDone) {
+          queue.push(function() {
+            done(null, file);
+          });
+        } else {
+          done(null, file);
+        }
+      }))
+      .pipe(webpackStream(config, webpack))
+  )
+    .pipe(gulpif(!dev, uglify()))
     .pipe(gulpif(file => file.basename === 'prebid-core.js', header(banner, { prebid: prebid })))
-    .pipe(gulp.dest('build/dist'));
+    .pipe(gulp.dest(dev ? 'build/dev' : 'build/dist'))
+    .pipe(gulpif(dev, connect.reload()));
 }
 
 function gulpBundle(dev) {
@@ -298,8 +321,8 @@ gulp.task(clean);
 
 gulp.task(escapePostbidConfig);
 
-gulp.task('build-bundle-dev', gulp.series(makeDevpackPkg, gulpBundle.bind(null, true)));
-gulp.task('build-bundle-prod', gulp.series(makeWebpackPkg, gulpBundle.bind(null, false)));
+gulp.task('build-bundle-dev', gulp.series(makeWebpackPkg.bind(null, true), gulpBundle.bind(null, true)));
+gulp.task('build-bundle-prod', gulp.series(makeWebpackPkg.bind(null, false), gulpBundle.bind(null, false)));
 
 // public tasks (dependencies are needed for each task since they can be ran on their own)
 gulp.task('test', gulp.series(clean, lint, test));
@@ -313,7 +336,7 @@ gulp.task('build', gulp.series(clean, 'build-bundle-prod'));
 gulp.task('build-postbid', gulp.series(escapePostbidConfig, buildPostbid));
 
 gulp.task('serve', gulp.series(clean, lint, gulp.parallel('build-bundle-dev', watch, test)));
-gulp.task('default', gulp.series(clean, makeWebpackPkg));
+gulp.task('default', gulp.series(clean, makeWebpackPkg.bind(null, true)));
 
 gulp.task('e2e-test', gulp.series(clean, setupE2e, gulp.parallel('build-bundle-dev', watch), test))
 // other tasks

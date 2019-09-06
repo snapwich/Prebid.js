@@ -22,26 +22,9 @@ if (argv.analyze) {
   )
 }
 
-plugins.push(  // this plugin must be last so it can be easily removed for karma unit tests
-  new webpack.optimize.CommonsChunkPlugin({
-    name: 'prebid',
-    filename: 'prebid-core.js',
-    minChunks: function(module) {
-       return (
-        (
-          module.context && module.context.startsWith(path.resolve('./src')) &&
-          !(module.resource && neverBundle.some(name => module.resource.includes(name)))
-        ) ||
-        module.resource && (allowedModules.src.concat(['core-js'])).some(
-          name => module.resource.includes(path.resolve('./node_modules/' + name))
-        )
-      );
-    }
-  })
-);
-
 module.exports = {
   devtool: 'source-map',
+  mode: 'production',
   resolve: {
     modules: [
       path.resolve('.'),
@@ -49,7 +32,11 @@ module.exports = {
     ],
   },
   output: {
-    jsonpFunction: prebid.globalVarName + "Chunk"
+    library: prebid.globalVarName
+    // jsonpFunction: prebid.globalVarName + "Chunk"
+  },
+  optimization: {
+    minimize: false
   },
   module: {
     rules: [
